@@ -1,8 +1,16 @@
 import os
 import logging
+import asyncio
 from dotenv import load_dotenv
-from telegram import Update, InputFile
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
+    RateLimiter
+)
 import google.generativeai as genai
 
 # Load environment variables
@@ -34,201 +42,173 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     *Version:* {BOT_VERSION}
     *Powered by Google Gemini AI*
 
-    📌 *Main Features:*
+    📌 *Features:*
     - Advanced AI conversations
     - Context-aware responses
     - Multi-language support
     - Image understanding (Beta)
-    - Document processing (PDF, TXT)
-    - Voice message transcription (Beta)
-    - Group chat support
-    - Customizable personality modes
+    - Document processing
+    - Voice message transcription
 
-    🛠 *Available Commands:*
-    /start - Start the bot
-    /help - Show full feature list
+    🛠 *Commands:*
+    /start - Show this message
+    /help - Full feature list
     /mode - Change response style
-    /reset - Reset conversation
+    /reset - Clear conversation history
     /status - System status
-    /version - Bot version
-    /feedback - Send feedback
+    /feedback - Send suggestions
 
-    ⚙ *Admin Commands:* (Restricted)
-    /broadcast - Send announcement
-    /stats - Usage statistics
-    /maintenance - Toggle maintenance
-
-    Just send me a message to start chatting!
+    Just send me a message to begin!
     """
     await update.message.reply_text(welcome_msg, parse_mode='Markdown')
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send a detailed help message with all features."""
+    """Send a detailed help message."""
     help_text = """
-    *🌟 Gemini V3 Full Feature Menu 🌟*
+    *🌟 Gemini V3 Full Features 🌟*
 
-    *🤖 Core AI Capabilities:*
+    *🤖 Core Capabilities:*
     - Google Gemini-powered responses
     - Multi-turn conversation memory
     - Technical/scientific explanations
-    - Creative writing and brainstorming
-    - Code generation and debugging
+    - Creative writing assistance
+    - Code generation & debugging
 
-    *🌐 Multi-Modal Support:*
-    - Text message processing
+    *📁 Media Support:*
+    - Text messages
     - Image analysis (describe content)
-    - Document processing (PDF, TXT, DOCX)
-    - Voice message transcription (Beta)
+    - PDF/TXT/DOCX processing
+    - Voice message transcription
 
     *⚙️ Customization:*
-    /mode professional - Formal responses
+    /mode professional - Formal style
     /mode casual - Friendly tone
     /mode creative - Imaginative answers
     /mode technical - Detailed explanations
-
-    *🛠 Utility Features:*
-    - Language translation
-    - Text summarization
-    - Content rewriting
-    - Question answering
-    - Fact checking
-
-    *👥 Group Chat Features:*
-    - @mention the bot in groups
-    - Moderation tools (for admins)
-    - Content filtering
 
     *🔒 Privacy:*
     - No permanent message storage
     - Optional data deletion
     - Encrypted communications
-
-    *⚡ Performance:*
-    - 1-3 second response time
-    - 99.9% uptime
-    - Auto-scaling for load
-
-    Type /commands to see all available commands.
     """
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
-async def version_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show bot version with system info."""
-    version_msg = f"""
-    *Gemini V3 System Information*
-
-    *Version:* {BOT_VERSION}
-    *Model:* Gemini Pro 1.5
-    *Last Updated:* 2024-05-20
-
-    *System Specs:*
-    - Host: AWS EC2 t3.xlarge
-    - Backup: Google Cloud Run
-    - Runtime: 24/7 with auto-scaling
-    - Memory: 16GB RAM
-    - Storage: 100GB SSD
-
-    *API Status:*
-    - Gemini API: Operational
-    - Telegram API: Connected
-    - Database: Online
-    """
-    await update.message.reply_text(version_msg, parse_mode='Markdown')
-
 async def mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Change response style."""
-    args = context.args
-    if not args:
+    modes = {
+        'professional': "Formal business style",
+        'casual': "Friendly conversational",
+        'creative': "Imaginative responses",
+        'technical': "Detailed explanations"
+    }
+    
+    if not context.args:
+        current_mode = context.chat_data.get('mode', 'default')
+        modes_list = "\n".join([f"/mode {m} - {desc}" for m, desc in modes.items()])
         await update.message.reply_text(
-            "Current response mode: Standard\n"
-            "Available modes:\n"
-            "/mode professional - Formal business style\n"
-            "/mode casual - Friendly conversational\n"
-            "/mode creative - Imaginative responses\n"
-            "/mode technical - Detailed explanations"
+            f"Current mode: {current_mode}\n\nAvailable modes:\n{modes_list}"
         )
         return
     
-    mode = args[0].lower()
-    if mode in ['professional', 'casual', 'creative', 'technical']:
-        context.chat_data['response_mode'] = mode
-        await update.message.reply_text(f"Response mode set to: {mode.capitalize()}")
+    new_mode = context.args[0].lower()
+    if new_mode in modes:
+        context.chat_data['mode'] = new_mode
+        await update.message.reply_text(f"✅ Mode set to: {new_mode}")
     else:
-        await update.message.reply_text("Invalid mode. Choose from: professional, casual, creative, technical")
+        await update.message.reply_text("❌ Invalid mode. Use /help for options")
 
-async def admin_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show admin commands (restricted)."""
-    user_id = update.effective_user.id
-    if user_id not in ADMIN_IDS:
-        await update.message.reply_text("⚠️ Restricted to administrators.")
-        return
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process all text messages."""
+    user_message = update.message.text
+    chat_id = update.message.chat_id
     
-    admin_text = """
-    *🛡 Admin Commands*
+    try:
+        # Initialize chat history
+        if 'chat_history' not in context.chat_data:
+            context.chat_data['chat_history'] = []
+        
+        # Add user message to history
+        context.chat_data['chat_history'].append({"role": "user", "parts": [user_message]})
+        
+        # Show typing indicator
+        await context.bot.send_chat_action(chat_id=chat_id, action='typing')
+        
+        # Generate response with timeout
+        try:
+            response = await asyncio.wait_for(
+                model.generate_content(
+                    context.chat_data['chat_history'],
+                    stream=True
+                ),
+                timeout=10.0
+            )
+            
+            full_response = "".join([chunk.text for chunk in response])
+            
+            # Store response in history
+            context.chat_data['chat_history'].append({"role": "model", "parts": [full_response]})
+            
+            # Split long messages
+            max_length = 4000
+            for i in range(0, len(full_response), max_length):
+                await update.message.reply_text(
+                    full_response[i:i+max_length],
+                    parse_mode='Markdown'
+                )
+                
+        except asyncio.TimeoutError:
+            await update.message.reply_text("⌛ Response timed out. Please try again.")
+            
+    except Exception as e:
+        logger.error(f"Error: {str(e)}")
+        await update.message.reply_text("⚠️ An error occurred. Please try again later.")
 
-    *User Management:*
-    /broadcast [msg] - Send to all users
-    /stats - Show usage statistics
-    /userinfo [id] - Get user details
-
-    *System Control:*
-    /maintenance [on/off] - Toggle mode
-    /restart - Restart bot service
-    /update - Pull latest code
-
-    *Configuration:*
-    /setlimit [number] - Set rate limit
-    /blacklist [id] - Block user
-    /whitelist [id] - Unblock user
-
-    *Data Management:*
-    /backup - Create system backup
-    /logs - Get recent logs
-    /clearcache - Reset cache
-    """
-    await update.message.reply_text(admin_text, parse_mode='Markdown')
+async def reset_context(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Clear conversation history."""
+    if 'chat_history' in context.chat_data:
+        del context.chat_data['chat_history']
+    await update.message.reply_text("🔄 Conversation history cleared!")
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show system status."""
     status_msg = """
     *🟢 System Status: Operational*
-
-    *Current Load:*
-    - Active conversations: 142
-    - API latency: 1.2s avg
-    - Memory usage: 34%
-
-    *Recent Uptime:*
-    - Last 24h: 100%
-    - Last 7d: 99.98%
-    - Last incident: None
-
+    
+    *Version:* v3.6
+    *Model:* Gemini Pro 1.5
+    *Uptime:* 99.9%
+    *Response Time:* 1.2s avg
+    
     *Next Maintenance:*
-    - Scheduled: 2024-06-01 03:00 UTC
-    - Expected downtime: <5 minutes
+    - Scheduled: None
     """
     await update.message.reply_text(status_msg, parse_mode='Markdown')
-
-# [Keep all other existing functions from the previous code]
 
 def main():
     """Start the bot."""
     application = Application.builder().token(BOT_TOKEN).build()
-
+    
+    # Add rate limiting (2 messages per 5 seconds)
+    rate_limiter = RateLimiter(2, 5)
+    
     # Command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("version", version_command))
+    application.add_handler(CommandHandler("mode", mode_command))
     application.add_handler(CommandHandler("reset", reset_context))
     application.add_handler(CommandHandler("status", status_command))
-    application.add_handler(CommandHandler("mode", mode_command))
-    application.add_handler(CommandHandler("admin", admin_commands))
     
-    # Message handler
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    # Start the Bot
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Message handler with rate limiting
+    application.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            handle_message,
+            rate_limiter=rate_limiter
+        )
+    )
+    
+    # Start polling
+    application.run_polling()
 
 if __name__ == '__main__':
     main()
